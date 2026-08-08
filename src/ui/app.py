@@ -14,7 +14,7 @@ from PIL import Image, ImageDraw
 import customtkinter as ctk
 
 from src.crypto.identity import Identity
-from src.crypto.cipher import derive_conversation_key, encrypt, decrypt, CipherError
+from src.crypto.cipher import derive_conversation_key, encrypt, decrypt, CipherError, SequenceTracker
 from src.network.relay import RelayConnection
 from src.storage.contacts import ContactStore, Contact
 from src.storage.messages import MessageStore
@@ -72,6 +72,7 @@ class CespoApp:
         self._msg_stores: Dict[str, MessageStore] = {}
         self._conv_keys: Dict[str, bytes] = {}
         self._settings_open = False
+        self._seq_tracker = SequenceTracker()
 
         self._theme = THEMES.get(self._profile.theme, THEMES[DEFAULT_THEME])
         self._apply_theme()
@@ -704,12 +705,15 @@ class CespoApp:
                 store.append(self._identity.void_id, text)
         if self._relay.connected:
             try:
-                msg_data = json.dumps({"type": "dm", "from": self._identity.void_id, "text": text, "nick": self._profile.display_name, "pub_bundle": self._identity.pub_bundle_b64}).encode()
+                seq = self._seq_tracker.next_outgoing(self._active_chat)
+                msg_data = json.dumps({"type": "dm", "from": self._identity.void_id, "text": text, "nick": self._profile.display_name, "pub_bundle": self._identity.pub_bundle_b64, "seq": seq}).encode()
+                sig = base64.b64encode(self._identity.sign(msg_data)).decode()
+                signed = json.dumps({"payload": msg_data.decode(), "sig": sig}).encode()
                 if self._active_chat in self._conv_keys:
-                    encrypted = encrypt(self._conv_keys[self._active_chat], msg_data)
+                    encrypted = encrypt(self._conv_keys[self._active_chat], signed)
                     self._relay.send_to(self._active_chat, encrypted)
                 else:
-                    self._relay.send_to(self._active_chat, msg_data)
+                    self._relay.send_to(self._active_chat, signed)
             except Exception as e:
                 self._chat_print(f"  send failed: {e}", "info")
 
@@ -739,47 +743,75 @@ class CespoApp:
             payload = raw[2 + sender_id_len:]
             contact = self._contacts.get(sender_id)
 
-            if not contact:
+            # Decrypt if we have a conversation key
+            if contact and contact.agreement_pub_b64 and sender_id in self._conv_keys:
                 try:
-                    msg = json.loads(payload.decode())
-                    nick = msg.get("nick", sender_id[:8])
-                    pub_bundle = msg.get("pub_bundle", "")
-                    signing_pub = ""
-                    agreement_pub = ""
-                    if pub_bundle:
-                        bundle = base64.b64decode(pub_bundle)
-                        signing_pub = base64.b64encode(bundle[:32]).decode()
-                        agreement_pub = base64.b64encode(bundle[32:64]).decode()
-                    contact = Contact(void_id=sender_id, display_name=nick, signing_pub_b64=signing_pub, agreement_pub_b64=agreement_pub)
-                    self._contacts.add(contact)
-                    self._window.after(0, self._render_contacts)
-                except Exception:
-                    return
-
-            if contact.agreement_pub_b64 and sender_id in self._conv_keys:
-                try:
-                    decrypted = decrypt(self._conv_keys[sender_id], payload)
-                    msg = json.loads(decrypted.decode())
+                    payload = decrypt(self._conv_keys[sender_id], payload)
                 except CipherError:
-                    try:
-                        msg = json.loads(payload.decode())
-                    except Exception:
-                        return
+                    pass
+
+            # Parse outer envelope (signed wrapper)
+            try:
+                envelope = json.loads(payload.decode())
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return
+
+            # Handle new contact (first message, no signature yet)
+            if not contact:
+                msg = envelope if "type" in envelope else json.loads(envelope.get("payload", "{}"))
+                nick = msg.get("nick", sender_id[:8])
+                pub_bundle = msg.get("pub_bundle", "")
+                signing_pub = ""
+                agreement_pub = ""
+                if pub_bundle:
+                    bundle = base64.b64decode(pub_bundle)
+                    signing_pub = base64.b64encode(bundle[:32]).decode()
+                    agreement_pub = base64.b64encode(bundle[32:64]).decode()
+                contact = Contact(void_id=sender_id, display_name=nick, signing_pub_b64=signing_pub, agreement_pub_b64=agreement_pub)
+                self._contacts.add(contact)
+                self._window.after(0, self._render_contacts)
+
+                if not contact.agreement_pub_b64 and pub_bundle:
+                    bundle = base64.b64decode(pub_bundle)
+                    their_pub = bundle[32:64]
+                    shared = self._identity.compute_shared_secret(their_pub)
+                    self._conv_keys[sender_id] = derive_conversation_key(shared, self._identity.void_id, sender_id)
+
+            # Verify signature (enforce: drop unsigned messages from known contacts)
+            if "sig" in envelope and "payload" in envelope:
+                sig = base64.b64decode(envelope["sig"])
+                payload_bytes = envelope["payload"].encode()
+                if contact.signing_pub_b64:
+                    signing_pub = base64.b64decode(contact.signing_pub_b64)
+                    from src.crypto.identity import Identity as IdCheck
+                    if not IdCheck.verify_signature(signing_pub, sig, payload_bytes):
+                        return  # signature invalid, drop
+                msg = json.loads(envelope["payload"])
+            elif contact.signing_pub_b64:
+                return  # known contact sent unsigned message, drop
             else:
-                try:
-                    msg = json.loads(payload.decode())
-                    if msg.get("pub_bundle") and not contact.agreement_pub_b64:
-                        bundle = base64.b64decode(msg["pub_bundle"])
-                        contact.signing_pub_b64 = base64.b64encode(bundle[:32]).decode()
-                        contact.agreement_pub_b64 = base64.b64encode(bundle[32:64]).decode()
-                        self._contacts.add(contact)
-                        their_pub = bundle[32:64]
-                        shared = self._identity.compute_shared_secret(their_pub)
-                        self._conv_keys[sender_id] = derive_conversation_key(shared, self._identity.void_id, sender_id)
-                except Exception:
-                    return
+                msg = envelope
+
+            # Establish key agreement if needed
+            if msg.get("pub_bundle") and not contact.agreement_pub_b64:
+                bundle = base64.b64decode(msg["pub_bundle"])
+                contact.signing_pub_b64 = base64.b64encode(bundle[:32]).decode()
+                contact.agreement_pub_b64 = base64.b64encode(bundle[32:64]).decode()
+                self._contacts.add(contact)
+                their_pub = bundle[32:64]
+                shared = self._identity.compute_shared_secret(their_pub)
+                self._conv_keys[sender_id] = derive_conversation_key(shared, self._identity.void_id, sender_id)
+
+            # Validate sequence number (replay protection)
+            seq = msg.get("seq")
+            if seq is not None:
+                if not self._seq_tracker.validate_incoming(sender_id, seq):
+                    return  # replay detected, drop
 
             text = msg.get("text", "")
+            if not text:
+                return
+
             store = self._get_msg_store(sender_id)
             if store:
                 store.append(sender_id, text)

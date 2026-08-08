@@ -1,12 +1,16 @@
 import socket
+import ssl
 import struct
 import json
+import hashlib
 import threading
 from typing import Optional, Callable
 
 RELAY_HOST = "hayabusa.proxy.rlwy.net"
 RELAY_PORT = 38403
 MAX_FRAME = 100 * 1024 * 1024
+
+PINNED_CERT_FINGERPRINTS = []
 
 
 class RelayConnection:
@@ -23,10 +27,25 @@ class RelayConnection:
 
     def connect(self, void_id: str, on_message: Callable) -> None:
         self._on_message = on_message
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._sock.settimeout(30)
+        raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        raw_sock.settimeout(30)
+
+        try:
+            context = ssl.create_default_context()
+            self._sock = context.wrap_socket(raw_sock, server_hostname=RELAY_HOST)
+        except (ssl.SSLError, OSError):
+            self._sock = raw_sock
+
         self._sock.connect((RELAY_HOST, RELAY_PORT))
         self._sock.settimeout(None)
+
+        if PINNED_CERT_FINGERPRINTS and hasattr(self._sock, 'getpeercert'):
+            der = self._sock.getpeercert(binary_form=True)
+            if der:
+                fp = hashlib.sha256(der).hexdigest()
+                if fp not in PINNED_CERT_FINGERPRINTS:
+                    self._sock.close()
+                    raise ConnectionError("Certificate pinning failed")
 
         self._send_frame(json.dumps({"type": "register", "id": void_id}).encode())
         response = self._sock.recv(16)
