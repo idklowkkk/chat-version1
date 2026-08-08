@@ -6,6 +6,7 @@ import base64
 import struct
 import shutil
 import threading
+import webbrowser
 from typing import Optional, Dict
 from tkinter import filedialog, messagebox
 from PIL import Image, ImageDraw
@@ -19,6 +20,7 @@ from src.storage.contacts import ContactStore, Contact
 from src.storage.messages import MessageStore
 from src.storage.profile import Profile
 from src.ui.themes import THEMES, DEFAULT_THEME, Theme
+from src.updater import check_for_update, SOURCE_URL, CURRENT_VERSION
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
@@ -79,6 +81,7 @@ class CespoApp:
         else:
             self._build_main()
             self._connect_relay()
+            self._check_update()
 
     def _apply_theme(self):
         self._window.configure(fg_color=self._theme.bg)
@@ -99,6 +102,28 @@ class CespoApp:
             self._status_text.configure(text=msg, text_color=self._t().accent)
             self._window.after(duration, lambda: self._status_text.configure(
                 text=original, text_color=original_color) if self._status_text.winfo_exists() else None)
+
+    def _check_update(self):
+        def on_result(new_version, download_url):
+            if new_version:
+                self._window.after(0, lambda: self._show_update_banner(new_version, download_url))
+        check_for_update(on_result)
+
+    def _show_update_banner(self, version: str, url: str):
+        if not hasattr(self, '_main') or not self._main.winfo_exists():
+            return
+        banner = ctk.CTkFrame(self._main, fg_color=self._t().surface, height=32, corner_radius=0)
+        banner.pack(fill="x", side="top", before=self._main.winfo_children()[0])
+        inner = ctk.CTkFrame(banner, fg_color="transparent")
+        inner.pack(fill="x", padx=12, pady=4)
+        ctk.CTkLabel(inner, text=f"v{version} available", font=ctk.CTkFont(size=10), text_color=self._t().warning).pack(side="left")
+        if url:
+            ctk.CTkButton(inner, text="Download", width=70, height=22, font=ctk.CTkFont(size=9), fg_color=self._t().accent, text_color="#000", hover_color=self._t().accent_hover, corner_radius=4, command=lambda: webbrowser.open(url)).pack(side="right")
+        ctk.CTkButton(inner, text="✕", width=22, height=22, font=ctk.CTkFont(size=10), fg_color="transparent", hover_color=self._t().border, text_color=self._t().text_dim, corner_radius=4, command=banner.destroy).pack(side="right", padx=(0, 4))
+
+    @staticmethod
+    def _open_source():
+        webbrowser.open(SOURCE_URL)
 
     def _show_setup(self):
         frame = ctk.CTkFrame(self._window, fg_color=self._t().bg)
@@ -287,6 +312,12 @@ class CespoApp:
             self._rebuild()
 
         ctk.CTkButton(dialog, text="Save", width=340, height=38, fg_color=self._t().accent, text_color="#000", hover_color=self._t().accent_hover, corner_radius=8, font=ctk.CTkFont(size=13, weight="bold"), command=save).pack(padx=24, pady=(4, 0))
+
+        # Footer
+        footer = ctk.CTkFrame(dialog, fg_color="transparent")
+        footer.pack(fill="x", padx=24, pady=(14, 10))
+        ctk.CTkLabel(footer, text=f"v{CURRENT_VERSION}", font=ctk.CTkFont(family="Consolas", size=9), text_color=self._t().text_dim).pack(side="left")
+        ctk.CTkButton(footer, text="Source Code", width=80, height=22, font=ctk.CTkFont(size=9), fg_color="transparent", hover_color=self._t().border, text_color=self._t().accent, corner_radius=4, command=self._open_source).pack(side="right")
 
     def _close_settings(self, dialog):
         self._settings_open = False
