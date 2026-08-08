@@ -51,6 +51,14 @@ class CespoApp:
         self._window.geometry("940x680")
         self._window.minsize(780, 560)
 
+        icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "icon.png")
+        if os.path.exists(icon_path):
+            self._window.iconbitmap(default="")
+            from PIL import ImageTk
+            icon_img = Image.open(icon_path).resize((32, 32), Image.LANCZOS)
+            self._icon_photo = ImageTk.PhotoImage(icon_img)
+            self._window.iconphoto(True, self._icon_photo)
+
         os.makedirs(DATA_DIR, exist_ok=True)
         os.makedirs(AVATARS_DIR, exist_ok=True)
 
@@ -196,6 +204,8 @@ class CespoApp:
         # Keybinds
         self._window.bind("<Escape>", lambda _: self._search_entry.delete(0, "end"))
         self._window.bind("<Control-comma>", lambda _: self._toggle_settings())
+        self._window.bind("<Control-f>", lambda _: self._open_search())
+        self._window.bind("<Control-F>", lambda _: self._open_search())
 
     def _toggle_settings(self):
         if self._settings_open:
@@ -203,7 +213,7 @@ class CespoApp:
         self._settings_open = True
         dialog = ctk.CTkToplevel(self._window)
         dialog.title("Settings")
-        dialog.geometry("420x480")
+        dialog.geometry("420x620")
         dialog.configure(fg_color=self._t().bg)
         dialog.transient(self._window)
         dialog.grab_set()
@@ -249,6 +259,20 @@ class CespoApp:
         del_var = ctk.StringVar(value=self._profile.auto_delete)
         ctk.CTkOptionMenu(dialog, values=["off", "24 hours", "3 days", "1 week"], variable=del_var, width=340, height=34, fg_color=self._t().input_bg, button_color=self._t().surface, button_hover_color=self._t().border, dropdown_fg_color=self._t().surface, dropdown_hover_color=self._t().border, text_color=self._t().text, font=ctk.CTkFont(size=12)).pack(padx=24, pady=(4, 14))
 
+        # Privacy toggles
+        ctk.CTkLabel(dialog, text="PRIVACY", font=ctk.CTkFont(family="Consolas", size=10), text_color=self._t().text_dim).pack(anchor="w", padx=24)
+        toggles_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        toggles_frame.pack(fill="x", padx=24, pady=(4, 14))
+
+        read_var = ctk.BooleanVar(value=self._profile.read_receipts)
+        ctk.CTkSwitch(toggles_frame, text="Read receipts", variable=read_var, font=ctk.CTkFont(size=11), text_color=self._t().text, fg_color=self._t().input_bg, progress_color=self._t().accent, button_color=self._t().accent).pack(anchor="w", pady=(0, 6))
+
+        seen_var = ctk.BooleanVar(value=self._profile.show_seen)
+        ctk.CTkSwitch(toggles_frame, text="Show 'seen' status", variable=seen_var, font=ctk.CTkFont(size=11), text_color=self._t().text, fg_color=self._t().input_bg, progress_color=self._t().accent, button_color=self._t().accent).pack(anchor="w", pady=(0, 6))
+
+        link_var = ctk.BooleanVar(value=self._profile.link_preview)
+        ctk.CTkSwitch(toggles_frame, text="Link previews", variable=link_var, font=ctk.CTkFont(size=11), text_color=self._t().text, fg_color=self._t().input_bg, progress_color=self._t().accent, button_color=self._t().accent).pack(anchor="w")
+
         # Save button
         def save():
             new_name = name_entry.get().strip()[:15]
@@ -256,6 +280,9 @@ class CespoApp:
                 self._profile.display_name = new_name
             self._profile.font_size = font_var.get()
             self._profile.auto_delete = del_var.get()
+            self._profile.read_receipts = read_var.get()
+            self._profile.show_seen = seen_var.get()
+            self._profile.link_preview = link_var.get()
             self._close_settings(dialog)
             self._rebuild()
 
@@ -350,8 +377,22 @@ class CespoApp:
     def _render_contacts(self):
         for w in self._contact_list.winfo_children():
             w.destroy()
-        for vid, contact in self._contacts.get_all().items():
-            self._make_contact_row(contact)
+        all_contacts = self._contacts.get_all()
+        pinned = self._profile.pinned_contacts
+
+        # Show pinned first
+        pinned_shown = False
+        for vid in pinned:
+            if vid in all_contacts:
+                if not pinned_shown:
+                    ctk.CTkLabel(self._contact_list, text="PINNED", font=ctk.CTkFont(family="Consolas", size=8), text_color=self._t().text_dim).pack(anchor="w", padx=8, pady=(4, 2))
+                    pinned_shown = True
+                self._make_contact_row(all_contacts[vid], is_pinned=True)
+
+        # Show rest
+        for vid, contact in all_contacts.items():
+            if vid not in pinned:
+                self._make_contact_row(contact, is_pinned=False)
 
     def _on_search(self):
         query = self._search_entry.get().strip().lower()
@@ -359,7 +400,7 @@ class CespoApp:
             w.destroy()
         for vid, contact in self._contacts.get_all().items():
             if not query or query in contact.display_name.lower() or query in contact.void_id:
-                self._make_contact_row(contact)
+                self._make_contact_row(contact, is_pinned=(vid in self._profile.pinned_contacts))
 
     def _on_search_enter(self):
         query = self._search_entry.get().strip().lower()
@@ -371,27 +412,40 @@ class CespoApp:
                 if contact:
                     self._open_chat(contact)
 
-    def _make_contact_row(self, contact: Contact):
+    def _make_contact_row(self, contact: Contact, is_pinned: bool = False):
         row = ctk.CTkFrame(self._contact_list, fg_color="transparent", cursor="hand2")
         row.pack(fill="x", pady=(0, 2))
 
         inner = ctk.CTkFrame(row, fg_color="transparent")
         inner.pack(fill="x", padx=8, pady=6)
 
-        # Avatar
         av = load_avatar("", 28)
         if av:
             ctk.CTkLabel(inner, text="", image=av, width=28, height=28).pack(side="left", padx=(0, 8))
 
-        # Name + truncated ID
         text_frame = ctk.CTkFrame(inner, fg_color="transparent")
         text_frame.pack(side="left", fill="x", expand=True)
-        ctk.CTkLabel(text_frame, text=contact.display_name, font=ctk.CTkFont(size=12, weight="bold"), text_color=self._t().text, anchor="w").pack(anchor="w")
+        name_text = f"📌 {contact.display_name}" if is_pinned else contact.display_name
+        ctk.CTkLabel(text_frame, text=name_text, font=ctk.CTkFont(size=12, weight="bold"), text_color=self._t().text, anchor="w").pack(anchor="w")
         ctk.CTkLabel(text_frame, text=contact.void_id, font=ctk.CTkFont(family="Consolas", size=8), text_color=self._t().text_dim, anchor="w").pack(anchor="w")
 
-        # Make entire row clickable
+        def show_context(event):
+            menu = ctk.CTkToplevel(self._window)
+            menu.geometry(f"120x70+{event.x_root}+{event.y_root}")
+            menu.overrideredirect(True)
+            menu.configure(fg_color=self._t().surface)
+            menu.attributes("-topmost", True)
+            if is_pinned:
+                ctk.CTkButton(menu, text="Unpin", height=28, fg_color="transparent", hover_color=self._t().border, text_color=self._t().text, font=ctk.CTkFont(size=11), anchor="w", command=lambda: [self._unpin_contact(contact), menu.destroy()]).pack(fill="x", padx=4, pady=(4, 0))
+            else:
+                ctk.CTkButton(menu, text="Pin", height=28, fg_color="transparent", hover_color=self._t().border, text_color=self._t().text, font=ctk.CTkFont(size=11), anchor="w", command=lambda: [self._pin_contact(contact), menu.destroy()]).pack(fill="x", padx=4, pady=(4, 0))
+            ctk.CTkButton(menu, text="Remove", height=28, fg_color="transparent", hover_color=self._t().border, text_color=self._t().danger, font=ctk.CTkFont(size=11), anchor="w", command=lambda: [self._delete_contact(contact), menu.destroy()]).pack(fill="x", padx=4, pady=(0, 4))
+            menu.bind("<FocusOut>", lambda _: menu.destroy())
+            menu.focus_set()
+
         for widget in [row, inner, text_frame] + text_frame.winfo_children() + inner.winfo_children():
             widget.bind("<Button-1>", lambda _, c=contact: self._open_chat(c))
+            widget.bind("<Button-3>", show_context)
             widget.bind("<Enter>", lambda _, r=row: r.configure(fg_color=self._t().surface))
             widget.bind("<Leave>", lambda _, r=row: r.configure(fg_color="transparent"))
 
@@ -530,6 +584,55 @@ class CespoApp:
             if store:
                 store.clear()
             self._open_chat(contact)
+
+    def _open_search(self):
+        if not hasattr(self, '_msg_display') or not self._active_chat:
+            return
+        dialog = ctk.CTkToplevel(self._window)
+        dialog.title("Search Messages")
+        dialog.geometry("360x80")
+        dialog.configure(fg_color=self._t().bg)
+        dialog.transient(self._window)
+        dialog.attributes("-topmost", True)
+
+        sf = ctk.CTkFrame(dialog, fg_color="transparent")
+        sf.pack(fill="x", padx=16, pady=16)
+        search_input = ctk.CTkEntry(sf, height=34, fg_color=self._t().input_bg, border_color=self._t().border, text_color=self._t().text, corner_radius=6, font=ctk.CTkFont(size=12), placeholder_text="Find in conversation...")
+        search_input.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        search_input.focus()
+
+        def do_search(event=None):
+            query = search_input.get().strip().lower()
+            if not query:
+                return
+            self._msg_display._textbox.tag_remove("sel", "1.0", "end")
+            content = self._msg_display._textbox.get("1.0", "end").lower()
+            idx = content.find(query)
+            if idx >= 0:
+                line = content[:idx].count("\n") + 1
+                col = idx - content[:idx].rfind("\n") - 1
+                start = f"{line}.{col}"
+                end = f"{line}.{col + len(query)}"
+                self._msg_display._textbox.tag_add("sel", start, end)
+                self._msg_display._textbox.see(start)
+
+        search_input.bind("<Return>", do_search)
+        ctk.CTkButton(sf, text="Find", width=60, height=34, fg_color=self._t().accent, text_color="#000", hover_color=self._t().accent_hover, corner_radius=6, font=ctk.CTkFont(size=11, weight="bold"), command=do_search).pack(side="right")
+        dialog.bind("<Escape>", lambda _: dialog.destroy())
+
+    def _pin_contact(self, contact: Contact):
+        pinned = self._profile.pinned_contacts
+        if contact.void_id not in pinned:
+            pinned.insert(0, contact.void_id)
+            self._profile.pinned_contacts = pinned
+            self._render_contacts()
+
+    def _unpin_contact(self, contact: Contact):
+        pinned = self._profile.pinned_contacts
+        if contact.void_id in pinned:
+            pinned.remove(contact.void_id)
+            self._profile.pinned_contacts = pinned
+            self._render_contacts()
 
     def _get_msg_store(self, contact_id: str) -> Optional[MessageStore]:
         if contact_id not in self._conv_keys:

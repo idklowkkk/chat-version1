@@ -85,3 +85,39 @@ class Profile:
     def font_size(self, value: int):
         self._data["font_size"] = max(9, min(16, value))
         self._save()
+
+    @property
+    def read_receipts(self) -> bool:
+        return self._data.get("read_receipts", False)
+
+    @read_receipts.setter
+    def read_receipts(self, value: bool):
+        self._data["read_receipts"] = value
+        self._save()
+
+    @property
+    def show_seen(self) -> bool:
+        return self._data.get("show_seen", False)
+
+    @show_seen.setter
+    def show_seen(self, value: bool):
+        self._data["show_seen"] = value
+        self._save()
+
+    @property
+    def link_preview(self) -> bool:
+        return self._data.get("link_preview", True)
+
+    @link_preview.setter
+    def link_preview(self, value: bool):
+        self._data["link_preview"] = value
+        self._save()
+
+    @property
+    def pinned_contacts(self) -> list:
+        return self._data.get("pinned_contacts", [])
+
+    @pinned_contacts.setter
+    def pinned_contacts(self, value: list):
+        self._data["pinned_contacts"] = value
+        self._save()
