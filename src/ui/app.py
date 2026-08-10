@@ -129,8 +129,11 @@ class CespoApp:
         webbrowser.open(SOURCE_URL)
 
     def _show_setup(self):
-        frame = ctk.CTkFrame(self._window, fg_color=self._t().bg)
-        frame.place(relx=0.5, rely=0.5, anchor="center")
+        wrapper = ctk.CTkFrame(self._window, fg_color=self._t().bg)
+        wrapper.pack(fill="both", expand=True)
+
+        frame = ctk.CTkFrame(wrapper, fg_color=self._t().bg, width=320)
+        frame.pack(expand=True, pady=80)
 
         ctk.CTkLabel(frame, text="cespo", font=ctk.CTkFont(family="Consolas", size=40, weight="bold"), text_color=self._t().accent).pack(pady=(0, 4))
         ctk.CTkLabel(frame, text="encrypted messaging", font=ctk.CTkFont(size=12), text_color=self._t().text_dim).pack(pady=(0, 28))
