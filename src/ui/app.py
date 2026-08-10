@@ -39,7 +39,7 @@ def load_avatar(path: str, size: int = 36) -> Optional[ctk.CTkImage]:
             img = Image.open(GUEST_PFP)
         else:
             return None
-        img = img.resize((size, size), Image.LANCZOS)
+        img = img.resize((size, size), Image.LANCZOS if hasattr(Image, 'LANCZOS') else Image.ANTIALIAS)
         return ctk.CTkImage(light_image=img, dark_image=img, size=(size, size))
     except Exception:
         return None
@@ -55,11 +55,13 @@ class CespoApp:
 
         icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "icon.png")
         if os.path.exists(icon_path):
-            self._window.iconbitmap(default="")
-            from PIL import ImageTk
-            icon_img = Image.open(icon_path).resize((32, 32), Image.LANCZOS)
-            self._icon_photo = ImageTk.PhotoImage(icon_img)
-            self._window.iconphoto(True, self._icon_photo)
+            try:
+                from PIL import ImageTk
+                icon_img = Image.open(icon_path).resize((32, 32), Image.LANCZOS)
+                self._icon_photo = ImageTk.PhotoImage(icon_img)
+                self._window.iconphoto(True, self._icon_photo)
+            except Exception:
+                pass
 
         os.makedirs(DATA_DIR, exist_ok=True)
         os.makedirs(AVATARS_DIR, exist_ok=True)
