@@ -9,7 +9,7 @@ import threading
 import webbrowser
 from typing import Optional, Dict
 from tkinter import filedialog, messagebox
-from PIL import Image, ImageDraw
+from PIL import Image
 
 import customtkinter as ctk
 

@@ -89,5 +89,10 @@ class Identity:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "wb") as f:
             f.write(signing_raw + agreement_raw)
+        if hasattr(os, 'chmod'):
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
 
         return cls(signing_key, agreement_key)
