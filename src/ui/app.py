@@ -22,6 +22,7 @@ from src.storage.messages import MessageStore
 from src.storage.profile import Profile
 from src.ui.themes import THEMES, DEFAULT_THEME, Theme
 from src.updater import check_for_update, SOURCE_URL, CURRENT_VERSION
+from src.audio import VoiceRecorder, play_audio, AUDIO_AVAILABLE
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
@@ -77,6 +78,7 @@ class CespoApp:
         self._conv_keys: Dict[str, bytes] = {}
         self._settings_open = False
         self._seq_tracker = SequenceTracker()
+        self._voice_recorder = VoiceRecorder()
 
         self._theme = THEMES.get(self._profile.theme, THEMES[DEFAULT_THEME])
         self._apply_theme()
@@ -701,7 +703,9 @@ class CespoApp:
         self._msg_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self._msg_entry.bind("<Return>", lambda _: self._send_message())
         self._msg_entry.bind("<KeyRelease>", lambda _: self._send_typing())
-        ctk.CTkButton(bi, text="File", width=50, height=36, font=ctk.CTkFont(size=11), fg_color=self._t().input_bg, hover_color=self._t().border, text_color=self._t().text_dim, corner_radius=6, command=self._send_file).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(bi, text="File", width=50, height=36, font=ctk.CTkFont(size=11), fg_color=self._t().input_bg, hover_color=self._t().border, text_color=self._t().text_dim, corner_radius=6, command=self._send_file).pack(side="left", padx=(0, 4))
+        self._mic_btn = ctk.CTkButton(bi, text="🎤", width=36, height=36, font=ctk.CTkFont(size=14), fg_color=self._t().input_bg, hover_color=self._t().border, text_color=self._t().text_dim, corner_radius=6, command=self._toggle_voice)
+        self._mic_btn.pack(side="left", padx=(0, 8))
         ctk.CTkButton(bi, text="Send", width=70, height=36, fg_color=self._t().accent, text_color="#000", hover_color=self._t().accent_hover, corner_radius=6, font=ctk.CTkFont(size=12, weight="bold"), command=self._send_message).pack(side="right")
 
         self._msg_entry.focus()
@@ -885,6 +889,36 @@ class CespoApp:
         size = os.path.getsize(path)
         self._chat_print(f"  ↑ {name} ({size} bytes)", "info")
 
+    def _toggle_voice(self):
+        if not AUDIO_AVAILABLE:
+            self._chat_print(f"  audio not available (install sounddevice + numpy)", "info")
+            return
+        if self._voice_recorder.is_recording:
+            self._stop_and_send_voice()
+        else:
+            self._start_voice()
+
+    def _start_voice(self):
+        if self._voice_recorder.start():
+            self._mic_btn.configure(text="⏹", fg_color=self._t().danger, text_color="#fff")
+            self._chat_print(f"  recording...", "info")
+
+    def _stop_and_send_voice(self):
+        wav_data = self._voice_recorder.stop()
+        self._mic_btn.configure(text="🎤", fg_color=self._t().input_bg, text_color=self._t().text_dim)
+        if not wav_data:
+            self._chat_print(f"  recording cancelled", "info")
+            return
+
+        duration = len(wav_data) / (16000 * 2)
+        self._chat_print(f"  🎤 voice ({duration:.1f}s)", "sent")
+
+        if self._active_chat and self._relay.connected:
+            try:
+                self._send_typed_message({"type": "voice", "audio": base64.b64encode(wav_data).decode(), "duration": round(duration, 1)})
+            except Exception as e:
+                self._chat_print(f"  voice send failed: {e}", "info")
+
     def _connect_relay(self):
         def task():
             try:
@@ -984,6 +1018,15 @@ class CespoApp:
                                        self._chat_print(f"  {n} reacted {e}", "info"))
                 return
 
+            # Handle voice message
+            if msg_type == "voice":
+                audio_b64 = msg.get("audio", "")
+                duration = msg.get("duration", 0)
+                if audio_b64:
+                    self._window.after(0, lambda n=contact.display_name, d=duration, a=audio_b64:
+                                       self._receive_voice(n, d, a))
+                return
+
             if not text:
                 return
 
@@ -1004,6 +1047,16 @@ class CespoApp:
                     delay_ms = self._parse_disappear_ms(disappear_timer)
                     if delay_ms > 0:
                         self._window.after(delay_ms, lambda: self._chat_print(f"  [message disappeared]", "info"))
+        except Exception:
+            pass
+
+    def _receive_voice(self, nick: str, duration: float, audio_b64: str):
+        self._chat_print(f"  🎤 {nick} ({duration}s) [click to play]", "recv")
+
+    def _play_voice(self, audio_b64: str):
+        try:
+            wav_data = base64.b64decode(audio_b64)
+            threading.Thread(target=lambda: play_audio(wav_data), daemon=True).start()
         except Exception:
             pass
 
