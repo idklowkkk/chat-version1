@@ -17,6 +17,7 @@ from src.crypto.identity import Identity
 from src.crypto.cipher import derive_conversation_key, encrypt, decrypt, CipherError, SequenceTracker
 from src.network.relay import RelayConnection
 from src.storage.contacts import ContactStore, Contact
+from src.storage.groups import GroupStore, Group
 from src.storage.messages import MessageStore
 from src.storage.profile import Profile
 from src.ui.themes import THEMES, DEFAULT_THEME, Theme
@@ -69,6 +70,7 @@ class CespoApp:
         self._identity = Identity.load_or_create(os.path.join(DATA_DIR, "identity.key"))
         self._profile = Profile(os.path.join(DATA_DIR, "profile.json"))
         self._contacts = ContactStore(os.path.join(DATA_DIR, "contacts.json"))
+        self._groups = GroupStore(os.path.join(DATA_DIR, "groups.json"))
         self._relay = RelayConnection()
         self._active_chat: Optional[str] = None
         self._msg_stores: Dict[str, MessageStore] = {}
@@ -196,6 +198,7 @@ class CespoApp:
         self._search_entry.bind("<KeyRelease>", lambda _: self._on_search())
         self._search_entry.bind("<Return>", lambda _: self._on_search_enter())
         ctk.CTkButton(sfi, text="+", width=28, height=28, font=ctk.CTkFont(size=14, weight="bold"), fg_color=self._t().accent, text_color="#000", hover_color=self._t().accent_hover, corner_radius=4, command=self._add_contact_dialog).pack(side="right")
+        ctk.CTkButton(sfi, text="G", width=28, height=28, font=ctk.CTkFont(size=11, weight="bold"), fg_color=self._t().surface, text_color=self._t().text_dim, hover_color=self._t().border, corner_radius=4, command=self._create_group_dialog).pack(side="right", padx=(0, 4))
 
         ctk.CTkLabel(self._sidebar, text="MESSAGES", font=ctk.CTkFont(family="Consolas", size=9), text_color=self._t().text_dim).pack(anchor="w", padx=14, pady=(2, 4))
 
@@ -415,9 +418,10 @@ class CespoApp:
         for w in self._contact_list.winfo_children():
             w.destroy()
         all_contacts = self._contacts.get_all()
+        all_groups = self._groups.get_all()
         pinned = self._profile.pinned_contacts
 
-        # Show pinned first
+        # Pinned
         pinned_shown = False
         for vid in pinned:
             if vid in all_contacts:
@@ -426,7 +430,16 @@ class CespoApp:
                     pinned_shown = True
                 self._make_contact_row(all_contacts[vid], is_pinned=True)
 
-        # Show rest
+        # Groups
+        if all_groups:
+            ctk.CTkLabel(self._contact_list, text="GROUPS", font=ctk.CTkFont(family="Consolas", size=8), text_color=self._t().text_dim).pack(anchor="w", padx=8, pady=(8, 2))
+            for gid, group in all_groups.items():
+                self._make_group_row(group)
+
+        # DMs
+        has_unpinned = any(vid not in pinned for vid in all_contacts)
+        if has_unpinned:
+            ctk.CTkLabel(self._contact_list, text="DIRECT", font=ctk.CTkFont(family="Consolas", size=8), text_color=self._t().text_dim).pack(anchor="w", padx=8, pady=(8, 2))
         for vid, contact in all_contacts.items():
             if vid not in pinned:
                 self._make_contact_row(contact, is_pinned=False)
@@ -485,6 +498,115 @@ class CespoApp:
             widget.bind("<Button-3>", show_context)
             widget.bind("<Enter>", lambda _, r=row: r.configure(fg_color=self._t().surface))
             widget.bind("<Leave>", lambda _, r=row: r.configure(fg_color="transparent"))
+
+    def _make_group_row(self, group: Group):
+        row = ctk.CTkFrame(self._contact_list, fg_color="transparent", cursor="hand2")
+        row.pack(fill="x", pady=(0, 2))
+        inner = ctk.CTkFrame(row, fg_color="transparent")
+        inner.pack(fill="x", padx=8, pady=6)
+
+        ctk.CTkLabel(inner, text="👥", font=ctk.CTkFont(size=14), width=28).pack(side="left", padx=(0, 8))
+        text_frame = ctk.CTkFrame(inner, fg_color="transparent")
+        text_frame.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(text_frame, text=group.name, font=ctk.CTkFont(size=12, weight="bold"), text_color=self._t().text, anchor="w").pack(anchor="w")
+        ctk.CTkLabel(text_frame, text=f"group", font=ctk.CTkFont(size=8), text_color=self._t().text_dim, anchor="w").pack(anchor="w")
+
+        for widget in [row, inner, text_frame] + text_frame.winfo_children() + inner.winfo_children():
+            widget.bind("<Button-1>", lambda _, g=group: self._open_group_chat(g))
+            widget.bind("<Enter>", lambda _, r=row: r.configure(fg_color=self._t().surface))
+            widget.bind("<Leave>", lambda _, r=row: r.configure(fg_color="transparent"))
+
+    def _create_group_dialog(self):
+        dialog = ctk.CTkToplevel(self._window)
+        dialog.title("Create/Join Group")
+        dialog.geometry("360x220")
+        dialog.configure(fg_color=self._t().bg)
+        dialog.transient(self._window)
+        dialog.grab_set()
+
+        ctk.CTkLabel(dialog, text="GROUP NAME", font=ctk.CTkFont(family="Consolas", size=10), text_color=self._t().text_dim).pack(anchor="w", padx=20, pady=(20, 4))
+        name_entry = ctk.CTkEntry(dialog, width=320, height=36, fg_color=self._t().input_bg, border_color=self._t().border, text_color=self._t().text, corner_radius=6, font=ctk.CTkFont(size=13), placeholder_text="group name")
+        name_entry.pack(padx=20)
+
+        ctk.CTkLabel(dialog, text="PASSWORD", font=ctk.CTkFont(family="Consolas", size=10), text_color=self._t().text_dim).pack(anchor="w", padx=20, pady=(12, 4))
+        pw_entry = ctk.CTkEntry(dialog, width=320, height=36, fg_color=self._t().input_bg, border_color=self._t().border, text_color=self._t().text, corner_radius=6, font=ctk.CTkFont(size=13), placeholder_text="shared password", show="●")
+        pw_entry.pack(padx=20)
+
+        def do_create():
+            name = name_entry.get().strip()
+            pw = pw_entry.get().strip()
+            if not name or not pw:
+                messagebox.showerror("Error", "Enter both name and password.", parent=dialog)
+                return
+            group = self._groups.create(name, pw)
+            self._render_contacts()
+            dialog.destroy()
+            self._open_group_chat(group)
+
+        name_entry.focus()
+        name_entry.bind("<Return>", lambda _: pw_entry.focus())
+        pw_entry.bind("<Return>", lambda _: do_create())
+        ctk.CTkButton(dialog, text="Create / Join", width=320, height=38, fg_color=self._t().accent, text_color="#000", hover_color=self._t().accent_hover, corner_radius=6, font=ctk.CTkFont(size=13, weight="bold"), command=do_create).pack(padx=20, pady=(16, 0))
+
+    def _open_group_chat(self, group: Group):
+        self._active_chat = f"grp:{group.group_id}"
+        for w in self._chat_area.winfo_children():
+            w.destroy()
+
+        header = ctk.CTkFrame(self._chat_area, fg_color=self._t().surface, height=54, corner_radius=0)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        hi = ctk.CTkFrame(header, fg_color="transparent")
+        hi.pack(fill="x", padx=16, pady=12)
+        ctk.CTkLabel(hi, text=f"👥 {group.name}", font=ctk.CTkFont(size=14, weight="bold"), text_color=self._t().text).pack(side="left")
+        ctk.CTkLabel(hi, text="group", font=ctk.CTkFont(size=9), text_color=self._t().text_dim).pack(side="left", padx=(10, 0))
+
+        self._msg_display = ctk.CTkTextbox(self._chat_area, fg_color=self._t().bg, text_color=self._t().text, font=ctk.CTkFont(family="Consolas", size=self._profile.font_size), corner_radius=0, state="disabled", wrap="word", border_width=0)
+        self._msg_display.pack(fill="both", expand=True)
+        self._msg_display._textbox.tag_config("sent", foreground=self._t().accent)
+        self._msg_display._textbox.tag_config("recv", foreground=self._t().incoming)
+        self._msg_display._textbox.tag_config("info", foreground=self._t().text_dim)
+
+        bar = ctk.CTkFrame(self._chat_area, fg_color=self._t().surface, height=56, corner_radius=0)
+        bar.pack(fill="x", side="bottom")
+        bar.pack_propagate(False)
+        bi = ctk.CTkFrame(bar, fg_color="transparent")
+        bi.pack(fill="x", padx=12, pady=10)
+        self._msg_entry = ctk.CTkEntry(bi, height=36, fg_color=self._t().input_bg, border_color=self._t().border, text_color=self._t().text, corner_radius=6, font=ctk.CTkFont(size=12), placeholder_text="message...")
+        self._msg_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self._msg_entry.bind("<Return>", lambda _: self._send_group_message(group))
+        ctk.CTkButton(bi, text="Send", width=70, height=36, fg_color=self._t().accent, text_color="#000", hover_color=self._t().accent_hover, corner_radius=6, font=ctk.CTkFont(size=12, weight="bold"), command=lambda: self._send_group_message(group)).pack(side="right")
+
+        self._msg_entry.focus()
+        self._chat_print(f"  joined #{group.name}", "info")
+
+        # Join the group on relay
+        if self._relay.connected:
+            try:
+                self._relay.send_to(f"grp:join:{group.group_id}", b"")
+            except Exception:
+                pass
+
+    def _send_group_message(self, group: Group):
+        if not self._msg_entry:
+            return
+        text = self._msg_entry.get().strip()
+        if not text:
+            return
+        self._msg_entry.delete(0, "end")
+        ts = time.strftime("%H:%M")
+        self._chat_print(f"  {ts}  you  {text}", "sent")
+
+        if self._relay.connected:
+            try:
+                from src.crypto.cipher import derive_conversation_key as dck
+                import hashlib as hl
+                group_key = dck(hl.sha256(group.password.encode()).digest(), group.group_id, group.group_id)
+                msg_data = json.dumps({"type": "grp", "text": text, "nick": self._profile.display_name, "from": self._identity.void_id}).encode()
+                encrypted = encrypt(group_key, msg_data)
+                self._relay.send_to(f"grp:{group.group_id}", encrypted)
+            except Exception as e:
+                self._chat_print(f"  send failed: {e}", "info")
 
     def _add_contact_dialog(self):
         dialog = ctk.CTkToplevel(self._window)
