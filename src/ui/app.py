@@ -661,7 +661,7 @@ class CespoApp:
             return
         self._msg_entry.delete(0, "end")
         ts = time.strftime("%H:%M")
-        self._chat_print(f"  {ts}  you  {text}", "sent")
+        self._chat_print(f"  {ts}  you: {text}", "sent")
 
         if self._relay.connected:
             try:
@@ -797,9 +797,9 @@ class CespoApp:
             sender = msg.get("from", "")
             text = msg.get("text", "")
             if sender == self._identity.void_id:
-                self._chat_print(f"  {ts}  you  {text}", "sent")
+                self._chat_print(f"  {ts}  you: {text}", "sent")
             else:
-                self._chat_print(f"  {ts}  {contact.display_name}  {text}", "recv")
+                self._chat_print(f"  {ts}  {contact.display_name}: {text}", "recv")
 
     def _delete_contact(self, contact: Contact):
         confirm = messagebox.askyesno("Remove Contact", f"Remove {contact.display_name} from contacts?")
@@ -1003,7 +1003,7 @@ class CespoApp:
         if not contact:
             return
         ts = time.strftime("%H:%M")
-        self._chat_print(f"  {ts}  you  {text}", "sent")
+        self._chat_print(f"  {ts}  you: {text}", "sent")
         if self._active_chat in self._conv_keys:
             store = self._get_msg_store(self._active_chat)
             if store:
@@ -1135,12 +1135,22 @@ class CespoApp:
             if "sig" in envelope and "payload" in envelope:
                 sig = base64.b64decode(envelope["sig"])
                 payload_bytes = envelope["payload"].encode()
+                msg = json.loads(envelope["payload"])
+                # Learn signing key from pub_bundle if we don't have it
+                if not contact.signing_pub_b64 and msg.get("pub_bundle"):
+                    bundle = base64.b64decode(msg["pub_bundle"])
+                    contact.signing_pub_b64 = base64.b64encode(bundle[:32]).decode()
+                    contact.agreement_pub_b64 = base64.b64encode(bundle[32:64]).decode()
+                    self._contacts.add(contact)
+                    their_pub = bundle[32:64]
+                    shared = self._identity.compute_shared_secret(their_pub)
+                    self._conv_keys[sender_id] = derive_conversation_key(shared, self._identity.void_id, sender_id)
+                # Verify if we have the key
                 if contact.signing_pub_b64:
                     signing_pub = base64.b64decode(contact.signing_pub_b64)
                     from src.crypto.identity import Identity as IdCheck
                     if not IdCheck.verify_signature(signing_pub, sig, payload_bytes):
                         return  # signature invalid, drop
-                msg = json.loads(envelope["payload"])
             elif contact.signing_pub_b64:
                 return  # known contact sent unsigned message, drop
             else:
@@ -1201,7 +1211,7 @@ class CespoApp:
             if self._active_chat == sender_id:
                 ts = time.strftime("%H:%M")
                 self._window.after(0, lambda t=text, n=contact.display_name, s=ts:
-                                   self._chat_print(f"  {s}  {n}  {t}", "recv"))
+                                   self._chat_print(f"  {s}  {n}: {t}", "recv"))
                 self._window.after(0, lambda: self._clear_typing(sender_id))
 
                 # Schedule disappearing if set
@@ -1257,7 +1267,7 @@ class CespoApp:
             if self._active_chat == grp_chat_id:
                 ts = time.strftime("%H:%M")
                 self._window.after(0, lambda t=text, n=nick, s=ts:
-                                   self._chat_print(f"  {s}  {n}  {t}", "recv"))
+                                   self._chat_print(f"  {s}  {n}: {t}", "recv"))
             else:
                 # Increment unread and notify
                 self._unread_counts[grp_chat_id] = self._unread_counts.get(grp_chat_id, 0) + 1
