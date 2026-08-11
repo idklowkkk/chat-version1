@@ -578,6 +578,7 @@ class CespoApp:
         self._msg_entry = ctk.CTkEntry(bi, height=36, fg_color=self._t().input_bg, border_color=self._t().border, text_color=self._t().text, corner_radius=6, font=ctk.CTkFont(size=12), placeholder_text="message...")
         self._msg_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self._msg_entry.bind("<Return>", lambda _: self._send_message())
+        self._msg_entry.bind("<KeyRelease>", lambda _: self._send_typing())
         ctk.CTkButton(bi, text="File", width=50, height=36, font=ctk.CTkFont(size=11), fg_color=self._t().input_bg, hover_color=self._t().border, text_color=self._t().text_dim, corner_radius=6, command=self._send_file).pack(side="left", padx=(0, 8))
         ctk.CTkButton(bi, text="Send", width=70, height=36, fg_color=self._t().accent, text_color="#000", hover_color=self._t().accent_hover, corner_radius=6, font=ctk.CTkFont(size=12, weight="bold"), command=self._send_message).pack(side="right")
 
@@ -692,6 +693,27 @@ class CespoApp:
         self._msg_display._textbox.see("end")
         self._msg_display.configure(state="disabled")
 
+    def _send_typed_message(self, msg_dict: dict):
+        """Send any message type to the active chat."""
+        if not self._active_chat or not self._relay.connected:
+            return
+        try:
+            seq = self._seq_tracker.next_outgoing(self._active_chat)
+            msg_dict["seq"] = seq
+            msg_dict["from"] = self._identity.void_id
+            msg_dict["nick"] = self._profile.display_name
+            msg_dict["pub_bundle"] = self._identity.pub_bundle_b64
+            msg_data = json.dumps(msg_dict).encode()
+            sig = base64.b64encode(self._identity.sign(msg_data)).decode()
+            signed = json.dumps({"payload": msg_data.decode(), "sig": sig}).encode()
+            if self._active_chat in self._conv_keys:
+                encrypted = encrypt(self._conv_keys[self._active_chat], signed)
+                self._relay.send_to(self._active_chat, encrypted)
+            else:
+                self._relay.send_to(self._active_chat, signed)
+        except Exception:
+            pass
+
     def _send_message(self):
         if not self._active_chat:
             return
@@ -708,19 +730,28 @@ class CespoApp:
             store = self._get_msg_store(self._active_chat)
             if store:
                 store.append(self._identity.void_id, text)
-        if self._relay.connected:
-            try:
-                seq = self._seq_tracker.next_outgoing(self._active_chat)
-                msg_data = json.dumps({"type": "dm", "from": self._identity.void_id, "text": text, "nick": self._profile.display_name, "pub_bundle": self._identity.pub_bundle_b64, "seq": seq}).encode()
-                sig = base64.b64encode(self._identity.sign(msg_data)).decode()
-                signed = json.dumps({"payload": msg_data.decode(), "sig": sig}).encode()
-                if self._active_chat in self._conv_keys:
-                    encrypted = encrypt(self._conv_keys[self._active_chat], signed)
-                    self._relay.send_to(self._active_chat, encrypted)
-                else:
-                    self._relay.send_to(self._active_chat, signed)
-            except Exception as e:
-                self._chat_print(f"  send failed: {e}", "info")
+
+        disappear = self._profile.auto_delete
+        self._send_typed_message({"type": "dm", "text": text, "disappear": disappear})
+        self._stop_typing()
+
+    def _send_typing(self):
+        """Send typing indicator to active chat."""
+        if not self._active_chat or not self._relay.connected:
+            return
+        if not hasattr(self, '_typing_sent') or not self._typing_sent:
+            self._typing_sent = True
+            self._send_typed_message({"type": "typing", "active": True})
+
+    def _stop_typing(self):
+        self._typing_sent = False
+
+    def _send_reaction(self, emoji: str, msg_index: int):
+        """Send an emoji reaction to a specific message."""
+        if not self._active_chat:
+            return
+        self._send_typed_message({"type": "reaction", "emoji": emoji, "msg_idx": msg_index})
+        self._chat_print(f"  reacted {emoji}", "info")
 
     def _send_file(self):
         if not self._active_chat or not self._relay.connected:
@@ -814,17 +845,74 @@ class CespoApp:
                     return  # replay detected, drop
 
             text = msg.get("text", "")
+            msg_type = msg.get("type", "dm")
+
+            # Handle typing indicator
+            if msg_type == "typing":
+                if msg.get("active"):
+                    self._window.after(0, lambda n=contact.display_name:
+                                       self._show_typing(n, sender_id))
+                return
+
+            # Handle reaction
+            if msg_type == "reaction":
+                emoji = msg.get("emoji", "")
+                if emoji:
+                    self._window.after(0, lambda e=emoji, n=contact.display_name:
+                                       self._chat_print(f"  {n} reacted {e}", "info"))
+                return
+
             if not text:
                 return
+
+            # Handle disappearing messages
+            disappear_timer = msg.get("disappear", "off")
 
             store = self._get_msg_store(sender_id)
             if store:
                 store.append(sender_id, text)
             if self._active_chat == sender_id:
                 ts = time.strftime("%H:%M")
-                self._window.after(0, lambda t=text, n=contact.display_name, s=ts: self._chat_print(f"  {s}  {n}  {t}", "recv"))
+                self._window.after(0, lambda t=text, n=contact.display_name, s=ts:
+                                   self._chat_print(f"  {s}  {n}  {t}", "recv"))
+                self._window.after(0, lambda: self._clear_typing(sender_id))
+
+                # Schedule disappearing if set
+                if disappear_timer and disappear_timer != "off":
+                    delay_ms = self._parse_disappear_ms(disappear_timer)
+                    if delay_ms > 0:
+                        self._window.after(delay_ms, lambda: self._chat_print(f"  [message disappeared]", "info"))
         except Exception:
             pass
+
+    def _show_typing(self, name: str, sender_id: str):
+        if hasattr(self, '_typing_label') and self._typing_label and self._typing_label.winfo_exists():
+            self._typing_label.configure(text=f"  {name} is typing...")
+        elif hasattr(self, '_msg_display') and self._active_chat == sender_id:
+            # Show typing below chat
+            pass
+        # Auto-clear after 3 seconds
+        if hasattr(self, '_typing_clear_id'):
+            self._window.after_cancel(self._typing_clear_id)
+        self._typing_clear_id = self._window.after(3000, lambda: self._clear_typing(sender_id))
+
+    def _clear_typing(self, sender_id: str):
+        pass
+
+    @staticmethod
+    def _parse_disappear_ms(timer_str: str) -> int:
+        if timer_str == "24 hours":
+            return 86400000
+        elif timer_str == "3 days":
+            return 259200000
+        elif timer_str == "1 week":
+            return 604800000
+        elif timer_str.endswith("h"):
+            try:
+                return int(timer_str[:-1]) * 3600000
+            except ValueError:
+                return 0
+        return 0
 
     def run(self):
         self._window.mainloop()
