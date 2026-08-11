@@ -13,6 +13,9 @@ MAX_QUEUE_AGE = 7 * 86400
 clients = {}
 clients_lock = threading.Lock()
 
+groups = {}
+groups_lock = threading.Lock()
+
 offline_queue = {}
 queue_lock = threading.Lock()
 
@@ -51,11 +54,7 @@ def queue_message(target_id, sender_id, payload):
         queue = offline_queue[target_id]
         if len(queue) >= MAX_QUEUE_PER_USER:
             queue.pop(0)
-        queue.append({
-            "sender_id": sender_id,
-            "payload": payload,
-            "ts": time.time(),
-        })
+        queue.append({"sender_id": sender_id, "payload": payload, "ts": time.time()})
 
 
 def deliver_queued(client_id, sock):
@@ -65,10 +64,46 @@ def deliver_queued(client_id, sock):
     for msg in messages:
         if now - msg["ts"] > MAX_QUEUE_AGE:
             continue
-        sender_id = msg["sender_id"]
-        payload = msg["payload"]
-        sender_header = struct.pack(">H", len(sender_id)) + sender_id.encode()
-        send_frame(sock, sender_header + payload)
+        sender_header = struct.pack(">H", len(msg["sender_id"])) + msg["sender_id"].encode()
+        send_frame(sock, sender_header + msg["payload"])
+
+
+def broadcast_to_group(group_id, sender_id, payload):
+    with groups_lock:
+        members = groups.get(group_id, set())
+    sender_header = struct.pack(">H", len(sender_id)) + sender_id.encode()
+    for member_id in members:
+        if member_id == sender_id:
+            continue
+        with clients_lock:
+            member_sock = clients.get(member_id)
+        if member_sock:
+            send_frame(member_sock, sender_header + payload)
+        else:
+            queue_message(member_id, sender_id, payload)
+
+
+def join_group(group_id, client_id):
+    with groups_lock:
+        if group_id not in groups:
+            groups[group_id] = set()
+        groups[group_id].add(client_id)
+
+
+def leave_group(group_id, client_id):
+    with groups_lock:
+        if group_id in groups:
+            groups[group_id].discard(client_id)
+            if not groups[group_id]:
+                del groups[group_id]
+
+
+def leave_all_groups(client_id):
+    with groups_lock:
+        for gid in list(groups.keys()):
+            groups[gid].discard(client_id)
+            if not groups[gid]:
+                del groups[gid]
 
 
 def purge_expired_queues():
@@ -77,10 +112,7 @@ def purge_expired_queues():
         now = time.time()
         with queue_lock:
             for uid in list(offline_queue.keys()):
-                offline_queue[uid] = [
-                    m for m in offline_queue[uid]
-                    if now - m["ts"] <= MAX_QUEUE_AGE
-                ]
+                offline_queue[uid] = [m for m in offline_queue[uid] if now - m["ts"] <= MAX_QUEUE_AGE]
                 if not offline_queue[uid]:
                     del offline_queue[uid]
 
@@ -109,7 +141,7 @@ def handle_client(sock, addr):
             clients[client_id] = sock
 
         sock.sendall(b"OK")
-        print(f"  [+] {client_id[:8]}... connected from {addr[0]}")
+        print(f"  [+] {client_id[:8]}... connected")
 
         deliver_queued(client_id, sock)
 
@@ -127,14 +159,24 @@ def handle_client(sock, addr):
             target_id = frame[2:2 + target_id_len].decode()
             payload = frame[2 + target_id_len:]
 
-            with clients_lock:
-                target_sock = clients.get(target_id)
-
-            if target_sock:
-                sender_header = struct.pack(">H", len(client_id)) + client_id.encode()
-                send_frame(target_sock, sender_header + payload)
+            # Group message: target starts with "grp:"
+            if target_id.startswith("grp:"):
+                group_id = target_id[4:]
+                join_group(group_id, client_id)
+                broadcast_to_group(group_id, client_id, payload)
+            # Group join command (empty payload with grp:join: prefix)
+            elif target_id.startswith("grp:join:"):
+                group_id = target_id[9:]
+                join_group(group_id, client_id)
             else:
-                queue_message(target_id, client_id, payload)
+                # Direct message
+                with clients_lock:
+                    target_sock = clients.get(target_id)
+                if target_sock:
+                    sender_header = struct.pack(">H", len(client_id)) + client_id.encode()
+                    send_frame(target_sock, sender_header + payload)
+                else:
+                    queue_message(target_id, client_id, payload)
 
     except (ConnectionResetError, BrokenPipeError, OSError):
         pass
@@ -143,6 +185,7 @@ def handle_client(sock, addr):
             with clients_lock:
                 if clients.get(client_id) == sock:
                     del clients[client_id]
+            leave_all_groups(client_id)
             print(f"  [-] {client_id[:8]}... disconnected")
         try:
             sock.close()
@@ -154,7 +197,7 @@ def main():
     print()
     print("  cespo relay")
     print(f"  port {PORT}")
-    print(f"  offline queue: {MAX_QUEUE_PER_USER} msgs/user, {MAX_QUEUE_AGE//86400}d retention")
+    print(f"  DMs + groups | offline queue: {MAX_QUEUE_PER_USER}/user, {MAX_QUEUE_AGE//86400}d")
     print()
 
     threading.Thread(target=purge_expired_queues, daemon=True).start()
