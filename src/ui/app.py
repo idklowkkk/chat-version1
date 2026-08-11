@@ -1,5 +1,6 @@
 import os
 import sys
+import re
 import time
 import json
 import base64
@@ -7,6 +8,7 @@ import struct
 import shutil
 import threading
 import webbrowser
+import platform
 from typing import Optional, Dict
 from tkinter import filedialog, messagebox
 from PIL import Image
@@ -23,6 +25,23 @@ from src.storage.profile import Profile
 from src.ui.themes import THEMES, DEFAULT_THEME, Theme
 from src.updater import check_for_update, SOURCE_URL, CURRENT_VERSION
 from src.audio import VoiceRecorder, play_audio, AUDIO_AVAILABLE
+
+# URL regex for link detection
+URL_PATTERN = re.compile(r'(https?://[^\s<>\"\']+)', re.IGNORECASE)
+
+
+def _play_notification_sound():
+    """Play a short notification beep. Uses winsound on Windows, falls back silently."""
+    try:
+        if platform.system() == "Windows":
+            import winsound
+            winsound.MessageBeep(winsound.MB_ICONINFORMATION)
+        else:
+            # On Mac/Linux try system bell
+            sys.stdout.write('\a')
+            sys.stdout.flush()
+    except Exception:
+        pass
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
@@ -79,6 +98,7 @@ class CespoApp:
         self._settings_open = False
         self._seq_tracker = SequenceTracker()
         self._voice_recorder = VoiceRecorder()
+        self._unread_counts: Dict[str, int] = {}  # contact/group id -> unread count
 
         self._theme = THEMES.get(self._profile.theme, THEMES[DEFAULT_THEME])
         self._apply_theme()
@@ -324,6 +344,23 @@ class CespoApp:
 
         ctk.CTkButton(dialog, text="Save", width=340, height=38, fg_color=self._t().accent, text_color="#000", hover_color=self._t().accent_hover, corner_radius=8, font=ctk.CTkFont(size=13, weight="bold"), command=save).pack(padx=24, pady=(4, 0))
 
+        # Export Identity button
+        def export_identity():
+            dest = filedialog.asksaveasfilename(
+                title="Export Identity Key",
+                defaultextension=".key",
+                initialfile="identity.key",
+                filetypes=[("Key files", "*.key"), ("All files", "*.*")],
+                parent=dialog
+            )
+            if dest:
+                src_key = os.path.join(DATA_DIR, "identity.key")
+                if os.path.exists(src_key):
+                    shutil.copy2(src_key, dest)
+                    messagebox.showinfo("Exported", f"Identity key saved to:\n{dest}", parent=dialog)
+
+        ctk.CTkButton(dialog, text="Export Identity", width=340, height=34, fg_color=self._t().surface, hover_color=self._t().border, text_color=self._t().text, corner_radius=8, font=ctk.CTkFont(size=12), command=export_identity).pack(padx=24, pady=(10, 0))
+
         # Footer
         footer = ctk.CTkFrame(dialog, fg_color="transparent")
         footer.pack(fill="x", padx=24, pady=(14, 10))
@@ -481,9 +518,18 @@ class CespoApp:
         ctk.CTkLabel(text_frame, text=name_text, font=ctk.CTkFont(size=12, weight="bold"), text_color=self._t().text, anchor="w").pack(anchor="w")
         ctk.CTkLabel(text_frame, text=contact.void_id, font=ctk.CTkFont(family="Consolas", size=8), text_color=self._t().text_dim, anchor="w").pack(anchor="w")
 
+        # Unread badge
+        unread = self._unread_counts.get(contact.void_id, 0)
+        if unread > 0:
+            badge = ctk.CTkLabel(inner, text=str(unread), width=22, height=22,
+                                 font=ctk.CTkFont(size=9, weight="bold"),
+                                 fg_color=self._t().accent, text_color="#000",
+                                 corner_radius=11)
+            badge.pack(side="right", padx=(4, 0))
+
         def show_context(event):
             menu = ctk.CTkToplevel(self._window)
-            menu.geometry(f"120x70+{event.x_root}+{event.y_root}")
+            menu.geometry(f"120x100+{event.x_root}+{event.y_root}")
             menu.overrideredirect(True)
             menu.configure(fg_color=self._t().surface)
             menu.attributes("-topmost", True)
@@ -491,6 +537,11 @@ class CespoApp:
                 ctk.CTkButton(menu, text="Unpin", height=28, fg_color="transparent", hover_color=self._t().border, text_color=self._t().text, font=ctk.CTkFont(size=11), anchor="w", command=lambda: [self._unpin_contact(contact), menu.destroy()]).pack(fill="x", padx=4, pady=(4, 0))
             else:
                 ctk.CTkButton(menu, text="Pin", height=28, fg_color="transparent", hover_color=self._t().border, text_color=self._t().text, font=ctk.CTkFont(size=11), anchor="w", command=lambda: [self._pin_contact(contact), menu.destroy()]).pack(fill="x", padx=4, pady=(4, 0))
+            # Block/unblock option
+            if self._profile.is_blocked(contact.void_id):
+                ctk.CTkButton(menu, text="Unblock", height=28, fg_color="transparent", hover_color=self._t().border, text_color=self._t().accent, font=ctk.CTkFont(size=11), anchor="w", command=lambda: [self._profile.unblock_user(contact.void_id), menu.destroy()]).pack(fill="x", padx=4)
+            else:
+                ctk.CTkButton(menu, text="Block", height=28, fg_color="transparent", hover_color=self._t().border, text_color=self._t().danger, font=ctk.CTkFont(size=11), anchor="w", command=lambda: [self._profile.block_user(contact.void_id), menu.destroy()]).pack(fill="x", padx=4)
             ctk.CTkButton(menu, text="Remove", height=28, fg_color="transparent", hover_color=self._t().border, text_color=self._t().danger, font=ctk.CTkFont(size=11), anchor="w", command=lambda: [self._delete_contact(contact), menu.destroy()]).pack(fill="x", padx=4, pady=(0, 4))
             menu.bind("<FocusOut>", lambda _: menu.destroy())
             menu.focus_set()
@@ -512,6 +563,16 @@ class CespoApp:
         text_frame.pack(side="left", fill="x", expand=True)
         ctk.CTkLabel(text_frame, text=group.name, font=ctk.CTkFont(size=12, weight="bold"), text_color=self._t().text, anchor="w").pack(anchor="w")
         ctk.CTkLabel(text_frame, text=f"group", font=ctk.CTkFont(size=8), text_color=self._t().text_dim, anchor="w").pack(anchor="w")
+
+        # Unread badge for group
+        grp_key = f"grp:{group.group_id}"
+        unread = self._unread_counts.get(grp_key, 0)
+        if unread > 0:
+            badge = ctk.CTkLabel(inner, text=str(unread), width=22, height=22,
+                                 font=ctk.CTkFont(size=9, weight="bold"),
+                                 fg_color=self._t().accent, text_color="#000",
+                                 corner_radius=11)
+            badge.pack(side="right", padx=(4, 0))
 
         for widget in [row, inner, text_frame] + text_frame.winfo_children() + inner.winfo_children():
             widget.bind("<Button-1>", lambda _, g=group: self._open_group_chat(g))
@@ -552,6 +613,9 @@ class CespoApp:
 
     def _open_group_chat(self, group: Group):
         self._active_chat = f"grp:{group.group_id}"
+        # Clear unread count for this group
+        self._unread_counts.pop(self._active_chat, None)
+        self._render_contacts()
         for w in self._chat_area.winfo_children():
             w.destroy()
 
@@ -675,6 +739,9 @@ class CespoApp:
 
     def _open_chat(self, contact: Contact):
         self._active_chat = contact.void_id
+        # Clear unread count for this contact
+        self._unread_counts.pop(contact.void_id, None)
+        self._render_contacts()
         for w in self._chat_area.winfo_children():
             w.destroy()
 
@@ -693,6 +760,7 @@ class CespoApp:
         self._msg_display._textbox.tag_config("sent", foreground=self._t().accent)
         self._msg_display._textbox.tag_config("recv", foreground=self._t().incoming)
         self._msg_display._textbox.tag_config("info", foreground=self._t().text_dim)
+        self._msg_display._textbox.bind("<Button-3>", self._show_message_context_menu)
 
         bar = ctk.CTkFrame(self._chat_area, fg_color=self._t().surface, height=56, corner_radius=0)
         bar.pack(fill="x", side="bottom")
@@ -816,6 +884,23 @@ class CespoApp:
     def _chat_print(self, text: str, tag: str = "info"):
         self._msg_display.configure(state="normal")
         self._msg_display._textbox.insert("end", text + "\n", tag)
+        # Detect and tag URLs for link detection
+        urls = URL_PATTERN.findall(text)
+        if urls:
+            content = self._msg_display._textbox.get("1.0", "end")
+            for url in urls:
+                start_idx = content.rfind(url)
+                if start_idx >= 0:
+                    line = content[:start_idx].count("\n") + 1
+                    col = start_idx - content[:start_idx].rfind("\n") - 1
+                    start_pos = f"{line}.{col}"
+                    end_pos = f"{line}.{col + len(url)}"
+                    link_tag = f"link_{start_pos}"
+                    self._msg_display._textbox.tag_add(link_tag, start_pos, end_pos)
+                    self._msg_display._textbox.tag_config(link_tag, foreground=self._t().accent, underline=True)
+                    self._msg_display._textbox.tag_bind(link_tag, "<Button-1>", lambda e, u=url: webbrowser.open(u))
+                    self._msg_display._textbox.tag_bind(link_tag, "<Enter>", lambda e: self._msg_display._textbox.config(cursor="hand2"))
+                    self._msg_display._textbox.tag_bind(link_tag, "<Leave>", lambda e: self._msg_display._textbox.config(cursor=""))
         self._msg_display._textbox.see("end")
         self._msg_display.configure(state="disabled")
 
@@ -839,6 +924,73 @@ class CespoApp:
                 self._relay.send_to(self._active_chat, signed)
         except Exception:
             pass
+
+    def _show_message_context_menu(self, event):
+        """Show right-click context menu on chat messages: Copy, React (emoji submenu), Delete."""
+        menu = ctk.CTkToplevel(self._window)
+        menu.overrideredirect(True)
+        menu.configure(fg_color=self._t().surface)
+        menu.attributes("-topmost", True)
+        menu.geometry(f"140x160+{event.x_root}+{event.y_root}")
+
+        # Get the selected text or current line
+        try:
+            sel_text = self._msg_display._textbox.get("sel.first", "sel.last")
+        except Exception:
+            # No selection, get the clicked line
+            idx = self._msg_display._textbox.index(f"@{event.x},{event.y}")
+            line_num = idx.split(".")[0]
+            sel_text = self._msg_display._textbox.get(f"{line_num}.0", f"{line_num}.end")
+
+        def copy_text():
+            if sel_text.strip():
+                self._copy_to_clipboard(sel_text.strip())
+            menu.destroy()
+
+        def delete_line():
+            try:
+                idx = self._msg_display._textbox.index(f"@{event.x},{event.y}")
+                line_num = idx.split(".")[0]
+                self._msg_display.configure(state="normal")
+                self._msg_display._textbox.delete(f"{line_num}.0", f"{int(line_num)+1}.0")
+                self._msg_display.configure(state="disabled")
+            except Exception:
+                pass
+            menu.destroy()
+
+        def show_react_submenu():
+            for w in menu.winfo_children():
+                w.destroy()
+            emojis = ["👍", "❤️", "😂", "🔥", "👀"]
+            ctk.CTkLabel(menu, text="React", font=ctk.CTkFont(size=10), text_color=self._t().text_dim).pack(anchor="w", padx=8, pady=(4, 2))
+            emoji_row = ctk.CTkFrame(menu, fg_color="transparent")
+            emoji_row.pack(fill="x", padx=4, pady=4)
+            for em in emojis:
+                ctk.CTkButton(emoji_row, text=em, width=24, height=24, font=ctk.CTkFont(size=14),
+                              fg_color="transparent", hover_color=self._t().border,
+                              command=lambda e=em: [self._send_reaction(e, 0), menu.destroy()]).pack(side="left", padx=1)
+            menu.geometry(f"140x60+{event.x_root}+{event.y_root}")
+
+        ctk.CTkButton(menu, text="Copy", height=28, fg_color="transparent", hover_color=self._t().border,
+                      text_color=self._t().text, font=ctk.CTkFont(size=11), anchor="w",
+                      command=copy_text).pack(fill="x", padx=4, pady=(4, 0))
+        ctk.CTkButton(menu, text="React", height=28, fg_color="transparent", hover_color=self._t().border,
+                      text_color=self._t().text, font=ctk.CTkFont(size=11), anchor="w",
+                      command=show_react_submenu).pack(fill="x", padx=4)
+        ctk.CTkButton(menu, text="Delete", height=28, fg_color="transparent", hover_color=self._t().border,
+                      text_color=self._t().danger, font=ctk.CTkFont(size=11), anchor="w",
+                      command=delete_line).pack(fill="x", padx=4, pady=(0, 4))
+
+        # Open links if the line has a URL
+        urls = URL_PATTERN.findall(sel_text)
+        if urls:
+            ctk.CTkButton(menu, text="Open Link", height=28, fg_color="transparent", hover_color=self._t().border,
+                          text_color=self._t().accent, font=ctk.CTkFont(size=11), anchor="w",
+                          command=lambda: [webbrowser.open(urls[0]), menu.destroy()]).pack(fill="x", padx=4, pady=(0, 4))
+            menu.geometry(f"140x190+{event.x_root}+{event.y_root}")
+
+        menu.bind("<FocusOut>", lambda _: menu.destroy())
+        menu.focus_set()
 
     def _send_message(self):
         if not self._active_chat:
@@ -933,6 +1085,16 @@ class CespoApp:
             sender_id_len = struct.unpack(">H", raw[:2])[0]
             sender_id = raw[2:2 + sender_id_len].decode()
             payload = raw[2 + sender_id_len:]
+
+            # Check if this is a group message (sender_id starts with "grp:")
+            if sender_id.startswith("grp:"):
+                self._handle_group_incoming(sender_id, payload)
+                return
+
+            # Block check - silently drop messages from blocked users
+            if self._profile.is_blocked(sender_id):
+                return
+
             contact = self._contacts.get(sender_id)
 
             # Decrypt if we have a conversation key
@@ -1047,6 +1209,61 @@ class CespoApp:
                     delay_ms = self._parse_disappear_ms(disappear_timer)
                     if delay_ms > 0:
                         self._window.after(delay_ms, lambda: self._chat_print(f"  [message disappeared]", "info"))
+            else:
+                # Chat not focused - increment unread and play notification
+                self._unread_counts[sender_id] = self._unread_counts.get(sender_id, 0) + 1
+                self._window.after(0, self._render_contacts)
+                if self._profile.notification_sound:
+                    threading.Thread(target=_play_notification_sound, daemon=True).start()
+        except Exception:
+            pass
+
+    def _handle_group_incoming(self, sender_id: str, payload: bytes):
+        """Handle incoming group messages. sender_id is 'grp:<group_id>'."""
+        try:
+            group_id = sender_id.split(":", 1)[1] if ":" in sender_id else sender_id
+            group = self._groups.get(group_id)
+            if not group:
+                return
+
+            # Derive group key and decrypt
+            import hashlib as hl
+            group_key = derive_conversation_key(
+                hl.sha256(group.password.encode()).digest(),
+                group.group_id, group.group_id
+            )
+            try:
+                decrypted = decrypt(group_key, payload)
+            except CipherError:
+                return
+
+            msg = json.loads(decrypted.decode())
+            if msg.get("type") != "grp":
+                return
+
+            text = msg.get("text", "")
+            nick = msg.get("nick", "unknown")
+            from_id = msg.get("from", "")
+
+            # Don't display our own messages (we already displayed them on send)
+            if from_id == self._identity.void_id:
+                return
+
+            # Block check
+            if from_id and self._profile.is_blocked(from_id):
+                return
+
+            grp_chat_id = f"grp:{group_id}"
+            if self._active_chat == grp_chat_id:
+                ts = time.strftime("%H:%M")
+                self._window.after(0, lambda t=text, n=nick, s=ts:
+                                   self._chat_print(f"  {s}  {n}  {t}", "recv"))
+            else:
+                # Increment unread and notify
+                self._unread_counts[grp_chat_id] = self._unread_counts.get(grp_chat_id, 0) + 1
+                self._window.after(0, self._render_contacts)
+                if self._profile.notification_sound:
+                    threading.Thread(target=_play_notification_sound, daemon=True).start()
         except Exception:
             pass
 

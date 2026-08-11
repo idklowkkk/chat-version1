@@ -121,3 +121,27 @@ class Profile:
     def pinned_contacts(self, value: list):
         self._data["pinned_contacts"] = value
         self._save()
+
+    @property
+    def blocked_users(self) -> list:
+        return self._data.get("blocked_users", [])
+
+    @blocked_users.setter
+    def blocked_users(self, value: list):
+        self._data["blocked_users"] = value
+        self._save()
+
+    def block_user(self, void_id: str):
+        blocked = self.blocked_users
+        if void_id not in blocked:
+            blocked.append(void_id)
+            self.blocked_users = blocked
+
+    def unblock_user(self, void_id: str):
+        blocked = self.blocked_users
+        if void_id in blocked:
+            blocked.remove(void_id)
+            self.blocked_users = blocked
+
+    def is_blocked(self, void_id: str) -> bool:
+        return void_id in self.blocked_users
