@@ -439,7 +439,7 @@ class CespoApp:
         center = ctk.CTkFrame(self._chat_area, fg_color="transparent")
         center.pack(fill="both", expand=True)
         inner = ctk.CTkFrame(center, fg_color="transparent")
-        inner.place(relx=0.5, rely=0.45, anchor="center")
+        inner.pack(expand=True, pady=100)
         ctk.CTkLabel(inner, text="cespo", font=ctk.CTkFont(family="Consolas", size=32, weight="bold"), text_color=self._t().accent).pack()
         ctk.CTkLabel(inner, text="end-to-end encrypted messaging", font=ctk.CTkFont(size=11), text_color=self._t().text_dim).pack(pady=(6, 16))
         ctk.CTkLabel(inner, text="select a conversation from the left\nor add a contact to get started", font=ctk.CTkFont(size=10), text_color=self._t().text_dim, justify="center").pack()
@@ -530,7 +530,7 @@ class CespoApp:
         def show_context(event):
             menu = ctk.CTkToplevel(self._window)
             menu.geometry(f"120x100+{event.x_root}+{event.y_root}")
-            menu.overrideredirect(True)
+            if platform.system() != "Darwin": menu.overrideredirect(True)
             menu.configure(fg_color=self._t().surface)
             menu.attributes("-topmost", True)
             if is_pinned:
@@ -761,6 +761,9 @@ class CespoApp:
         self._msg_display._textbox.tag_config("recv", foreground=self._t().incoming)
         self._msg_display._textbox.tag_config("info", foreground=self._t().text_dim)
         self._msg_display._textbox.bind("<Button-3>", self._show_message_context_menu)
+        if platform.system() == "Darwin":
+            self._msg_display._textbox.bind("<Button-2>", self._show_message_context_menu)
+            self._msg_display._textbox.bind("<Control-Button-1>", self._show_message_context_menu)
 
         bar = ctk.CTkFrame(self._chat_area, fg_color=self._t().surface, height=56, corner_radius=0)
         bar.pack(fill="x", side="bottom")
@@ -928,7 +931,7 @@ class CespoApp:
     def _show_message_context_menu(self, event):
         """Show right-click context menu on chat messages: Copy, React (emoji submenu), Delete."""
         menu = ctk.CTkToplevel(self._window)
-        menu.overrideredirect(True)
+        if platform.system() != "Darwin": menu.overrideredirect(True)
         menu.configure(fg_color=self._t().surface)
         menu.attributes("-topmost", True)
         menu.geometry(f"140x160+{event.x_root}+{event.y_root}")
