@@ -29,19 +29,7 @@ class RelayConnection:
         self._on_message = on_message
         raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         raw_sock.settimeout(30)
-
-        try:
-            context = ssl.create_default_context()
-            self._sock = context.wrap_socket(raw_sock, server_hostname=RELAY_HOST)
-        except (ssl.SSLError, OSError):
-            # TLS failed, create a fresh socket for plain TCP
-            try:
-                raw_sock.close()
-            except OSError:
-                pass
-            raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            raw_sock.settimeout(30)
-            self._sock = raw_sock
+        self._sock = raw_sock
 
         self._sock.connect((RELAY_HOST, RELAY_PORT))
         self._sock.settimeout(None)
