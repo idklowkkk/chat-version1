@@ -98,7 +98,8 @@ class CespoApp:
         self._settings_open = False
         self._seq_tracker = SequenceTracker()
         self._voice_recorder = VoiceRecorder()
-        self._unread_counts: Dict[str, int] = {}  # contact/group id -> unread count
+        self._unread_counts: Dict[str, int] = {}
+        self._key_confirmed: Dict[str, bool] = {}  # True after we receive a message from them
 
         self._theme = THEMES.get(self._profile.theme, THEMES[DEFAULT_THEME])
         self._apply_theme()
@@ -920,7 +921,7 @@ class CespoApp:
             msg_data = json.dumps(msg_dict).encode()
             sig = base64.b64encode(self._identity.sign(msg_data)).decode()
             signed = json.dumps({"payload": msg_data.decode(), "sig": sig}).encode()
-            if self._active_chat in self._conv_keys:
+            if self._active_chat in self._conv_keys and self._key_confirmed.get(self._active_chat):
                 encrypted = encrypt(self._conv_keys[self._active_chat], signed)
                 self._relay.send_to(self._active_chat, encrypted)
             else:
@@ -1211,6 +1212,10 @@ class CespoApp:
             store = self._get_msg_store(sender_id)
             if store:
                 store.append(sender_id, text)
+
+            # Mark key exchange as confirmed (we received from them successfully)
+            if sender_id in self._conv_keys:
+                self._key_confirmed[sender_id] = True
             if self._active_chat == sender_id:
                 ts = time.strftime("%H:%M")
                 self._window.after(0, lambda t=text, n=contact.display_name, s=ts:
